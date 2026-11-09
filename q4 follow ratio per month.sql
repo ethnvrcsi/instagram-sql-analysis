@@ -1,4 +1,4 @@
--- Q5: How has my follow ratio changed month over month?
+-- Q4: How has my follow ratio changed month over month?
 
 WITH monthly AS (
     SELECT p.year_month,
