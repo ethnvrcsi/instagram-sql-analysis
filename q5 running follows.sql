@@ -1,4 +1,4 @@
--- Q6a: How do my follows add up over time?
+-- Q5: How do my follows add up over time?
 
 WITH monthly AS (
     SELECT p.year_month, SUM(m.follows) AS follows
