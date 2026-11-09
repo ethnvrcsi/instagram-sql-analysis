@@ -1,0 +1,26 @@
+-- Q3: What was my best follow-ratio reel each month?
+
+WITH ranked AS (
+    SELECT p.year_month,
+           p.publish_date,
+           p.duration_sec,
+           m.reach,
+           m.follows,
+           m.follows * 1000.0 / m.reach AS follow_ratio,
+           RANK() OVER (
+               PARTITION BY p.year_month
+               ORDER BY m.follows * 1000.0 / m.reach DESC
+           ) AS month_rank
+    FROM posts p
+    JOIN post_metrics m ON m.post_id = p.post_id
+    WHERE m.reach >= 1000
+)
+SELECT year_month,
+       publish_date,
+       duration_sec,
+       reach,
+       follows,
+       ROUND(follow_ratio, 2) AS follows_per_1k_reach
+FROM ranked
+WHERE month_rank = 1
+ORDER BY year_month;
