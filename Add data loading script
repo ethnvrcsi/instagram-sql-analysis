@@ -1,0 +1,139 @@
+"""
+Loads my Instagram Insights export (CSV) into a SQLite database.
+
+Run it like this:
+    python load_instagram.py your_export.csv
+
+It makes instagram.db with 4 tables: posts, post_metrics, time_slots, duration_buckets.
+"""
+import sqlite3
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+# csv comes from the command line, database gets saved next to the script
+CSV_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("instagram_export.csv")
+DB_PATH = Path("instagram.db")
+
+# Table setup. The export is one big flat table, so I split it in two:
+# posts (what the post is) and post_metrics (how it did), linked by post_id.
+# The DROP lines let me re-run the script without errors.
+SCHEMA = """
+DROP TABLE IF EXISTS post_metrics;
+DROP TABLE IF EXISTS posts;
+DROP TABLE IF EXISTS time_slots;
+DROP TABLE IF EXISTS duration_buckets;
+
+CREATE TABLE posts (
+    post_id       INTEGER PRIMARY KEY,
+    publish_ts    TEXT NOT NULL,      -- full timestamp, YYYY-MM-DD HH:MM:SS
+    publish_date  TEXT NOT NULL,      -- just the date
+    year_month    TEXT NOT NULL,      -- YYYY-MM, used for monthly grouping
+    post_type     TEXT NOT NULL,      -- reel or carousel
+    duration_sec  INTEGER NOT NULL,
+    description   TEXT,
+    permalink     TEXT
+);
+
+CREATE TABLE post_metrics (
+    post_id   INTEGER PRIMARY KEY REFERENCES posts(post_id),
+    views     INTEGER NOT NULL,
+    reach     INTEGER NOT NULL,
+    likes     INTEGER NOT NULL,
+    shares    INTEGER NOT NULL,
+    follows   INTEGER NOT NULL,
+    comments  INTEGER NOT NULL,
+    saves     INTEGER NOT NULL
+);
+
+-- lookup table: hour of the day -> time-of-day label
+CREATE TABLE time_slots (
+    hour       INTEGER PRIMARY KEY,   -- 0 to 23
+    slot_name  TEXT NOT NULL
+);
+
+-- lookup table: reel length ranges, so I can group reels by length
+CREATE TABLE duration_buckets (
+    bucket_name  TEXT PRIMARY KEY,
+    min_sec      INTEGER NOT NULL,
+    max_sec      INTEGER NOT NULL,
+    sort_order   INTEGER NOT NULL
+);
+"""
+
+
+def slot_for_hour(h: int) -> str:
+    # the number in front of each label keeps them in order when sorted
+    if 5 <= h <= 11:
+        return "1-Morning (5-11)"
+    if 12 <= h <= 16:
+        return "2-Afternoon (12-16)"
+    if 17 <= h <= 20:
+        return "3-Evening (17-20)"
+    return "4-Night (21-4)"
+
+
+def main() -> None:
+    # utf-8-sig gets rid of a hidden character at the start of Instagram's file
+    df = pd.read_csv(CSV_PATH, encoding="utf-8-sig")
+    df.columns = [c.strip() for c in df.columns]
+
+    # Instagram gives dates like 10/21/2026 20:11, so I convert them into
+    # real timestamps that SQLite's date functions can read
+    ts = pd.to_datetime(df["Publish time"], format="%m/%d/%Y %H:%M")
+
+    # posts table: one row per post
+    posts = pd.DataFrame(
+        {
+            "post_id": df["Post ID"],
+            "publish_ts": ts.dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "publish_date": ts.dt.strftime("%Y-%m-%d"),
+            "year_month": ts.dt.strftime("%Y-%m"),
+            "post_type": df["Post type"],
+            "duration_sec": df["Duration (sec)"],
+            "description": df["Description"],
+            "permalink": df["Permalink"],
+        }
+    )
+
+    # post_metrics table: the numbers for each post, renamed to lowercase
+    metrics = df[
+        ["Post ID", "Views", "Reach", "Likes", "Shares", "Follows", "Comments", "Saves"]
+    ].copy()
+    metrics.columns = [
+        "post_id", "views", "reach", "likes", "shares", "follows", "comments", "saves",
+    ]
+
+    # lookup tables
+    time_slots = pd.DataFrame({"hour": range(24)})
+    time_slots["slot_name"] = time_slots["hour"].map(slot_for_hour)
+
+    duration_buckets = pd.DataFrame(
+        [
+            ("1-Under 8s", 0, 7, 1),
+            ("2-8 to 10s", 8, 10, 2),
+            ("3-11 to 15s", 11, 15, 3),
+            ("4-16 to 30s", 16, 30, 4),
+            ("5-Over 30s", 31, 100000, 5),
+        ],
+        columns=["bucket_name", "min_sec", "max_sec", "sort_order"],
+    )
+
+    # I left out the account columns (same value every row), "Date" (always
+    # says Lifetime) and "Data comment" (totally empty)
+    with sqlite3.connect(DB_PATH) as con:
+        con.executescript(SCHEMA)
+        posts.to_sql("posts", con, if_exists="append", index=False)
+        metrics.to_sql("post_metrics", con, if_exists="append", index=False)
+        time_slots.to_sql("time_slots", con, if_exists="append", index=False)
+        duration_buckets.to_sql("duration_buckets", con, if_exists="append", index=False)
+
+        # quick check that everything loaded
+        for t in ["posts", "post_metrics", "time_slots", "duration_buckets"]:
+            n = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            print(f"{t}: {n} rows")
+
+
+if __name__ == "__main__":
+    main()
